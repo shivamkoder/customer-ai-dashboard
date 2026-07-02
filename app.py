@@ -5,6 +5,7 @@ import joblib
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+import google.generativeai as genai
 
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="Customer AI Manager", layout="wide")
@@ -31,8 +32,10 @@ if 'predicted_cols' not in st.session_state:
     st.session_state.predicted_cols = []
 if 'feature_importance' not in st.session_state:
     st.session_state.feature_importance = None
+if 'gemini_api_key' not in st.session_state:
+    st.session_state.gemini_api_key = ""
 
-# ---------- SIDEBAR: UPLOAD ----------
+# ---------- SIDEBAR: UPLOAD & GEMINI API KEY ----------
 with st.sidebar:
     st.header("📁 Data Source")
     
@@ -62,6 +65,25 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error merging files: {e}")
 
+    st.divider()
+    
+    # ---------- Gemini API Key ----------
+    st.subheader("🤖 Gemini AI (Free Tier)")
+    api_key = st.text_input(
+        "Enter your Gemini API key",
+        type="password",
+        help="Get one at https://makersuite.google.com/app/apikey"
+    )
+    if api_key:
+        st.session_state.gemini_api_key = api_key
+        try:
+            genai.configure(api_key=api_key)
+            st.success("Gemini configured successfully!")
+        except Exception as e:
+            st.error(f"Failed to configure Gemini: {e}")
+    else:
+        st.info("AI recommendations will be disabled.")
+    
     st.divider()
     st.caption("💡 **Instructions:**")
     st.caption("1. Upload CSV(s)")
@@ -98,37 +120,30 @@ if st.session_state.df is not None:
                     try:
                         df_pred = st.session_state.df.copy()
                         
-                        # --- Define the exact feature columns expected by the model ---
                         feature_cols = [
                             'Gender', 'Age', 'City', 'Membership Type', 'Total Spend',
                             'Items Purchased', 'Average Rating', 'Discount Applied', 'Days Since Last Purchase'
                         ]
                         
-                        # --- Check if all required columns exist ---
                         missing_cols = [col for col in feature_cols if col not in df_pred.columns]
                         if missing_cols:
                             st.error(f"❌ Missing required columns: {missing_cols}. Please upload a CSV that includes all these columns.")
                             st.stop()
                         
-                        # --- Extract only the required columns ---
                         X_pred = df_pred[feature_cols].copy()
                         
-                        # --- Clean 'Discount Applied' ---
                         X_pred['Discount Applied'] = X_pred['Discount Applied'].apply(
                             lambda x: 1 if x in [True, 'TRUE', 'True', 'true', 1, '1', 'Yes', 'yes', 'Y', 'y'] else 0
                         )
                         
-                        # --- Ensure numeric columns are numeric ---
                         numeric_cols = ['Age', 'Total Spend', 'Items Purchased', 'Average Rating', 'Days Since Last Purchase']
                         for col in numeric_cols:
                             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce')
                         
-                        # --- Predict ---
                         pred_encoded = model.predict(X_pred)
                         probabilities = model.predict_proba(X_pred)
                         pred_labels = label_encoder.inverse_transform(pred_encoded)
                         
-                        # --- Store results ---
                         st.session_state.df['Predicted Satisfaction'] = pred_labels
                         st.session_state.df['Confidence'] = probabilities.max(axis=1).round(2)
                         
@@ -143,7 +158,6 @@ if st.session_state.df is not None:
                         st.session_state.df['Recommended Action'] = st.session_state.df.apply(get_action, axis=1)
                         st.session_state.predicted_cols = ['Predicted Satisfaction', 'Confidence', 'Recommended Action']
                         
-                        # --- Extract feature importance ---
                         try:
                             xgb_model = model.named_steps['classifier']
                             preprocessor = model.named_steps['preprocessor']
@@ -205,9 +219,7 @@ if st.session_state.df is not None:
             st.write("🔴 **Top Churn Risks (Unsatisfied Customers)**")
             st.dataframe(risk_df.head(10), use_container_width=True)
 
-        # ------------------------------------------------------------
-        # KEY BUSINESS INSIGHTS SECTION
-        # ------------------------------------------------------------
+        # ---- 3. KEY BUSINESS INSIGHTS TABS ----
         st.divider()
         st.subheader("📊 Key Business Insights (What Drives Satisfaction?)")
         
@@ -220,7 +232,6 @@ if st.session_state.df is not None:
                 names = [item[0] for item in top_10]
                 values = [item[1] for item in top_10]
                 
-                # Clean up feature names for display
                 display_names = []
                 for name in names:
                     if '_' in name and name.split('_')[0] in ['Gender', 'City', 'Membership Type']:
@@ -266,10 +277,15 @@ if st.session_state.df is not None:
             
             profile_cols = ['Age', 'Total Spend', 'Items Purchased', 'Average Rating', 'Days Since Last Purchase']
             profile_df = df_viz.groupby('Predicted Satisfaction')[profile_cols].mean().reset_index()
-            st.dataframe(
-                profile_df.style.background_gradient(cmap='RdYlGn', subset=['Average Rating', 'Total Spend']),
-                use_container_width=True
-            )
+            
+            try:
+                st.dataframe(
+                    profile_df.style.background_gradient(cmap='RdYlGn', subset=['Average Rating', 'Total Spend']),
+                    use_container_width=True
+                )
+            except ImportError:
+                st.dataframe(profile_df, use_container_width=True)
+                st.warning("Install matplotlib for color gradients.")
             
             fig_profile = px.bar(
                 profile_df, 
@@ -343,7 +359,75 @@ if st.session_state.df is not None:
             Action: Shift budget from broad discounts to fixing product quality / support for your top drivers!
             """)
 
-        # --- CONTINUE WITH FULL DATAFRAME ---
+        # ------------------------------------------------------------
+        # 🚀 NEW: GEMINI AI RECOMMENDATIONS
+        # ------------------------------------------------------------
+        st.divider()
+        st.subheader("🤖 AI-Generated Business Facts & Recommendations (Gemini)")
+        
+        if st.session_state.gemini_api_key:
+            if st.button("💡 Generate AI Recommendations", use_container_width=True):
+                with st.spinner("Gemini is analyzing your data and generating insights..."):
+                    try:
+                        # 1. Gather data for the prompt
+                        feature_names = [item[0] for item in st.session_state.feature_importance[:10]] if st.session_state.feature_importance else []
+                        
+                        total_customers = len(df_viz)
+                        satisfied_count = len(df_viz[df_viz['Predicted Satisfaction'] == 'Satisfied'])
+                        neutral_count = len(df_viz[df_viz['Predicted Satisfaction'] == 'Neutral'])
+                        unsatisfied_count = len(df_viz[df_viz['Predicted Satisfaction'] == 'Unsatisfied'])
+                        
+                        profile_avg = df_viz.groupby('Predicted Satisfaction')[['Total Spend', 'Average Rating', 'Days Since Last Purchase']].mean().round(2)
+                        
+                        # City risk summary (top 3 cities with highest % unsatisfied)
+                        city_risk = {}
+                        if not risk_heat.empty:
+                            city_risk = risk_heat.groupby('City')['Percentage'].mean().sort_values(ascending=False).head(3).to_dict()
+                        
+                        # Discount impact (percentage of unsatisfied with discount vs without)
+                        discount_effect = df_viz.groupby('Discount Applied')['Predicted Satisfaction'].value_counts(normalize=True).unstack().fillna(0)
+                        
+                        # Build the prompt
+                        prompt = f"""
+You are a senior business consultant. Based on the customer satisfaction analysis below, provide:
+1. **Three key facts** that stand out from the data.
+2. **Three recommended steps** to improve customer satisfaction and reduce churn.
+
+Data Summary:
+- Total customers: {total_customers}
+- Satisfied: {satisfied_count}, Neutral: {neutral_count}, Unsatisfied: {unsatisfied_count}
+- Top 5 drivers of satisfaction: {feature_names[:5] if feature_names else 'Not available'}
+- Average metrics by segment:
+  * Satisfied: Spend ${profile_avg.loc['Satisfied', 'Total Spend']:.0f}, Rating {profile_avg.loc['Satisfied', 'Average Rating']:.1f}, Days since purchase {profile_avg.loc['Satisfied', 'Days Since Last Purchase']:.0f}
+  * Neutral: Spend ${profile_avg.loc['Neutral', 'Total Spend']:.0f}, Rating {profile_avg.loc['Neutral', 'Average Rating']:.1f}, Days since purchase {profile_avg.loc['Neutral', 'Days Since Last Purchase']:.0f}
+  * Unsatisfied: Spend ${profile_avg.loc['Unsatisfied', 'Total Spend']:.0f}, Rating {profile_avg.loc['Unsatisfied', 'Average Rating']:.1f}, Days since purchase {profile_avg.loc['Unsatisfied', 'Days Since Last Purchase']:.0f}
+- Cities with highest % unsatisfied: {city_risk if city_risk else 'No data'}
+- Discount effect: 
+  * With discount: Unsatisfied {discount_effect.loc[1, 'Unsatisfied']*100:.0f}% of total, Satisfied {discount_effect.loc[1, 'Satisfied']*100:.0f}%
+  * Without discount: Unsatisfied {discount_effect.loc[0, 'Unsatisfied']*100:.0f}%, Satisfied {discount_effect.loc[0, 'Satisfied']*100:.0f}%
+
+Please respond in clear, plain text with bullet points. Be specific, actionable, and concise.
+"""
+                        
+                        # 2. Call Gemini
+                        genai.configure(api_key=st.session_state.gemini_api_key)
+                        model_gemini = genai.GenerativeModel('gemini-1.5-flash')
+                        response = model_gemini.generate_content(prompt)
+                        
+                        if response and response.text:
+                            st.success("✅ Gemini Analysis Complete!")
+                            st.markdown("### 📝 Key Facts & Recommended Steps")
+                            st.write(response.text)
+                        else:
+                            st.error("No response from Gemini. Please try again.")
+                    
+                    except Exception as e:
+                        st.error(f"Error during Gemini generation: {e}")
+                        st.info("Make sure your API key is valid and you have enabled billing (free tier works).")
+        else:
+            st.info("Enter your Gemini API key in the sidebar to enable AI recommendations.")
+
+        # --- FULL DATAFRAME VIEW ---
         st.divider()
         st.subheader("📋 Complete Customer List (With AI Insights)")
         
@@ -376,7 +460,6 @@ if st.session_state.df is not None:
         )
 
     else:
-        # If data is loaded but not yet predicted
         st.info("Click 'Re-run Predictions' to analyze your data.")
 
 else:
