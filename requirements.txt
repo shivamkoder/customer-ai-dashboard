@@ -6,3 +6,4 @@ xgboost
 joblib
 plotly
 matplotlib
+google-generativeai
